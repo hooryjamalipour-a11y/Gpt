@@ -374,6 +374,11 @@
         <!-- Top Connection & Recording Toolbar -->
         <div class="bg-studio-900 border-b border-slate-800 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap items-center gap-2">
+                <div class="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-slate-950 p-1">
+                    <button type="button" onclick="document.getElementById('media-file-input')?.click()" class="bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold px-3 py-2 rounded-md">＋ افزودن مدیا</button>
+                    <button type="button" onclick="playPlaylist()" class="bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold px-3 py-2 rounded-md">▶ پخش</button>
+                    <button type="button" onclick="stopPlaylist()" class="bg-red-700 hover:bg-red-600 text-white text-xs font-bold px-3 py-2 rounded-md">■ توقف</button>
+                </div>
                 <div class="flex items-center bg-slate-950 border border-slate-700 rounded-lg overflow-hidden focus-within:border-emerald-500">
                     <span class="px-2 text-xs text-slate-400">🔗 کد دوربین ۱:</span>
                     <input id="dir-connect-input" type="text" maxlength="6" placeholder="مثلاً 4821" class="bg-transparent text-white font-mono font-bold text-sm w-24 px-1.5 py-1 outline-none text-center tracking-widest">
@@ -1786,6 +1791,7 @@
         // 12. SWITCHER & THROTTLED REMOTE COMMANDS
         // ============================================================================
         function selectPreviewSource(src) {
+            if (src !== 'media' && state.pvwSource === 'media') stopPlaylist();
             state.pvwSource = src;
             document.getElementById('pvw-source-label').innerText = src.toUpperCase();
             document.querySelectorAll('.pvw-btn').forEach(btn => {
@@ -1798,6 +1804,7 @@
         }
 
         function directCutToProgram(src) {
+            if (src !== 'media' && state.pgmSource === 'media') stopPlaylist();
             state.pgmSource = src;
             state.transitionProgress = 0;
             document.getElementById('tbar-slider').value = 0;
@@ -1989,7 +1996,7 @@
                 if (mw > 0 && mh > 0 && isPortraitMedia) {
                     // Portrait media + presenter side-by-side; presenter stays on the LEFT.
                     const split = w * 0.5;
-                    drawVideoSmart(ctx, document.getElementById('hidden-cam1-video'), 0, 0, split, h, 'REACTION', 0, 'cover', false);
+                    drawVideoSmart(ctx, document.getElementById('hidden-cam1-video'), 0, 0, split, h, 'REACTION', state.cam1Rotation, 'cover', state.cam1Mirror);
                     drawMediaLayer(ctx, split, 0, w - split, h, ts);
                 } else {
                     drawMediaLayer(ctx, 0, 0, w, h, ts);
@@ -1998,17 +2005,21 @@
                     const px = Math.max(0, Math.min(w - size, w * state.reactionOverlay.x));
                     const py = Math.max(0, Math.min(h - size, h * state.reactionOverlay.y));
                     ctx.save(); ctx.fillStyle = '#000000'; ctx.fillRect(px - 3, py - 3, size + 6, size + 6);
-                    drawVideoSmart(ctx, document.getElementById('hidden-cam1-video'), px, py, size, size, 'REACTION', 0, 'cover', false);
+                    drawVideoSmart(ctx, document.getElementById('hidden-cam1-video'), px, py, size, size, 'REACTION', state.cam1Rotation, 'cover', state.cam1Mirror);
                     ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = Math.max(1, w * 0.002); ctx.strokeRect(px, py, size, size); ctx.restore();
                 }
             } else if (sourceType === 'pip') {
-                drawVideoSmart(ctx, document.getElementById('hidden-cam1-video'), 0, 0, w, h, 'CAM 1', state.cam1Rotation, state.cam1FitMode, state.cam1Mirror);
-                const pw = w * 0.32, ph = h * 0.32, px = w - pw - (w*0.025), py = h * 0.04;
+                // PiP: media is the main picture; CAM 1 (presenter) is the small inset.
+                drawMediaLayer(ctx, 0, 0, w, h, ts);
+                const pw = Math.min(w * 0.20, h * 0.34), ph = pw;
+                const px = Math.max(w * 0.02, Math.min(w - pw - w * 0.02, w * state.reactionOverlay.x));
+                const py = Math.max(h * 0.02, Math.min(h - ph - h * 0.02, h * state.reactionOverlay.y));
                 ctx.save();
-                ctx.strokeStyle = '#3b82f6';
-                ctx.lineWidth = 4;
+                ctx.fillStyle = '#000000'; ctx.fillRect(px - 3, py - 3, pw + 6, ph + 6);
+                drawVideoSmart(ctx, document.getElementById('hidden-cam1-video'), px, py, pw, ph, 'CAM 1', state.cam1Rotation, 'cover', state.cam1Mirror);
+                ctx.strokeStyle = '#e2e8f0';
+                ctx.lineWidth = Math.max(2, w * 0.003);
                 ctx.strokeRect(px, py, pw, ph);
-                drawMediaLayer(ctx, px, py, pw, ph, ts);
                 ctx.restore();
             } else if (sourceType === 'split') {
                 const halfW = w / 2 - 4;
@@ -2233,7 +2244,7 @@
                 connectMediaElementToAudioMixer(video);
                 video.onended = () => {
                     if (!state.mediaPlaylistRunning) return;
-                    const mode = document.getElementById('playlist-mode')?.value || 'sequence';
+                    const mode = state.mediaPlaylistMode || document.getElementById('playlist-mode')?.value || 'sequence';
                     if (mode === 'sequence' && state.mediaPlaylistIndex < state.mediaPlaylist.length - 1) loadPlaylistItem(state.mediaPlaylistIndex + 1, true);
                     else stopPlaylist();
                 };
