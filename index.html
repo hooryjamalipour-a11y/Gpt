@@ -334,7 +334,7 @@
                 <select id="cam-audio-input-select" onchange="changeAudioInput(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white">
                     <option value="">میکروفون پیش‌فرض گوشی</option>
                 </select>
-                <div id="audio-input-status" class="text-[10px] leading-relaxed text-slate-400">میکروفون خارجی را وصل کن؛ سپس تازه‌سازی و ورودی درست را انتخاب کن.</div>
+                <div id="audio-input-status" class="text-[10px] leading-relaxed text-slate-400">این انتخاب فقط در حالت «گوشی دوربین» استفاده می‌شود؛ در حالت پیشنهادی، میکروفون به گوشی کارگردان وصل شود.</div>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <!-- Zoom Control -->
@@ -702,10 +702,34 @@
 
                 <!-- TAB 4: Audio Mixer -->
                 <div id="tab-content-audio" class="hidden p-3 space-y-3 flex-1 flex flex-col justify-between">
+                    <div class="rounded-xl border border-emerald-700/50 bg-slate-950/90 p-3 space-y-2">
+                        <div class="text-xs font-bold text-emerald-300">🎙️ مسیر صدای ضبط</div>
+                        <label for="audio-source-mode" class="block text-[11px] text-slate-300">میکروفون به کدام گوشی وصل است؟</label>
+                        <select id="audio-source-mode" onchange="changeAudioSourceMode(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white">
+                            <option value="director" selected>گوشی کارگردان — صدا محلی (پیشنهادی)</option>
+                            <option value="camera">گوشی دوربین — صدا از WebRTC</option>
+                        </select>
+                        <div id="audio-route-status" class="text-[11px] leading-relaxed text-slate-300">حالت پیشنهادی: صدای میکروفون از همین گوشی ضبط می‌شود؛ تصویر از گوشی دوربین می‌آید.</div>
+                        <div id="webrtc-stats-status" class="text-[10px] leading-relaxed text-slate-400">آمار WebRTC پس از اتصال نمایش داده می‌شود.</div>
+                    </div>
                     <div class="rounded-xl border border-blue-700/50 bg-slate-950/70 p-3 space-y-2">
-                        <div class="text-xs font-bold text-blue-300">📡 وضعیت انتقال صدای دوربین ۱</div>
-                        <div id="webrtc-stats-status" class="text-[11px] leading-relaxed text-slate-300">آمار صوتی پس از اتصال دوربین نمایش داده می‌شود.</div>
-                        <div class="text-[10px] text-slate-500">انتخاب میکروفون خارجی باید روی خود گوشیِ دوربین انجام شود.</div>
+                        <div class="flex items-center justify-between gap-2">
+                            <label for="director-audio-input-select" class="text-xs font-bold text-blue-300">🎤 ورودی میکروفون همین گوشی</label>
+                            <button type="button" onclick="refreshDirectorAudioInputs()" class="text-[10px] px-2 py-1 rounded bg-slate-800 text-slate-200">🔄 تازه‌سازی</button>
+                        </div>
+                        <select id="director-audio-input-select" onchange="changeDirectorAudioInput(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white">
+                            <option value="">میکروفون پیش‌فرض همین گوشی</option>
+                        </select>
+                        <button type="button" onclick="startDirectorAudioInput()" class="w-full rounded-lg bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold py-2">فعال‌سازی میکروفون کارگردان</button>
+                        <div id="director-audio-input-status" class="text-[11px] leading-relaxed text-slate-400">اگر میکروفون به گوشی کارگردان وصل است، اینجا فعالش کن.</div>
+                    </div>
+                    <div class="rounded-xl border border-amber-700/50 bg-slate-950/70 p-3 space-y-2">
+                        <div class="flex justify-between gap-2 items-center">
+                            <label for="director-audio-delay" class="text-xs font-bold text-amber-300">⏱️ تأخیر صدا برای هماهنگی با تصویر</label>
+                            <span id="director-audio-delay-label" class="font-mono text-xs text-amber-200">1000 ms</span>
+                        </div>
+                        <input id="director-audio-delay" type="range" min="0" max="2500" step="50" value="1000" oninput="setDirectorAudioDelay(this.value)" class="w-full accent-amber-400">
+                        <div class="text-[10px] text-slate-400">از ۰ تا ۲۵۰۰ میلی‌ثانیه تنظیم کن. مقدار دقیق را با تست دست‌زدن/کِلَپ و فایل ضبط‌شده تنظیم کن؛ ۱۰۰۰ms فقط نقطه شروع است.</div>
                     </div>
                     <div class="space-y-3">
                         <div class="space-y-1">
@@ -808,6 +832,12 @@
             rawAudioTrack: null,
             currentAudioDeviceId: '',
             availableAudioInputs: [],
+            audioSourceMode: 'director',
+            remoteAudioMode: 'director',
+            directorMicStream: null,
+            directorAudioDeviceId: '',
+            directorAudioDelayMs: 1000,
+            directorAudioDelayNode: null,
             webrtcStatsTimer: null,
             lastAudioStatSnapshot: {},
             webrtcDisconnectedSince: 0,
@@ -1159,6 +1189,115 @@
             }
         }
 
+        async function refreshDirectorAudioInputs() {
+            const status = document.getElementById('director-audio-input-status');
+            const select = document.getElementById('director-audio-input-select');
+            if (!navigator.mediaDevices?.enumerateDevices || !select) return;
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const inputs = devices.filter(d => d.kind === 'audioinput');
+                const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+                select.innerHTML = '<option value="">میکروفون پیش‌فرض همین گوشی</option>' + inputs.map((d, i) =>
+                    `<option value="${esc(d.deviceId)}">${esc(d.label || `ورودی صدا ${i + 1}`)}</option>`
+                ).join('');
+                if (state.directorAudioDeviceId && inputs.some(d => d.deviceId === state.directorAudioDeviceId)) select.value = state.directorAudioDeviceId;
+                if (status && !state.directorMicStream) status.textContent = inputs.length
+                    ? `ورودی‌های صوتی پیدا شد: ${inputs.length}. ورودی خارجی را انتخاب و «فعال‌سازی» را بزن.`
+                    : 'ورودی‌ها هنوز دیده نمی‌شوند؛ ابتدا میکروفون را وصل کن و مجوز میکروفون را بده.';
+            } catch (err) {
+                if (status) status.textContent = `خواندن ورودی‌های صوتی ناموفق بود: ${err.message}`;
+            }
+        }
+
+        async function changeDirectorAudioInput(deviceId) {
+            state.directorAudioDeviceId = deviceId || '';
+            if (state.directorMicStream) await startDirectorAudioInput();
+            else {
+                const status = document.getElementById('director-audio-input-status');
+                if (status) status.textContent = 'ورودی انتخاب شد؛ برای فعال‌کردن میکروفون دکمه آبی را بزن.';
+            }
+        }
+
+        async function startDirectorAudioInput() {
+            const status = document.getElementById('director-audio-input-status');
+            if (state.role !== 'director') {
+                if (status) status.textContent = 'این ورودی فقط روی گوشی کارگردان فعال می‌شود.';
+                return;
+            }
+            let candidate = null;
+            try {
+                const audio = {
+                    echoCancellation: { ideal: false },
+                    noiseSuppression: { ideal: false },
+                    autoGainControl: { ideal: false }
+                };
+                if (state.directorAudioDeviceId) audio.deviceId = { exact: state.directorAudioDeviceId };
+                candidate = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+                const track = candidate.getAudioTracks()[0];
+                if (!track) throw new Error('مرورگر ترک صوتی نساخت.');
+                const previous = state.directorMicStream;
+                state.directorMicStream = new MediaStream([track]);
+                const settings = track.getSettings ? track.getSettings() : {};
+                if (settings.deviceId) state.directorAudioDeviceId = settings.deviceId;
+                track.onended = () => {
+                    const el = document.getElementById('director-audio-input-status');
+                    if (el) el.textContent = 'میکروفون قطع شد؛ دوباره فعال‌سازی را بزن.';
+                };
+                if (state.audioSourceMode === 'director') {
+                    initWebAudioMixer();
+                    if (state.audioCtx?.state === 'suspended') await state.audioCtx.resume();
+                    connectStreamToAudioMixer('cam1', state.directorMicStream);
+                    if (status) status.textContent = `میکروفون محلی فعال: ${track.label || 'ورودی انتخاب‌شده'} | نرخ نمونه ${settings.sampleRate || '—'} Hz | کانال ${settings.channelCount || '—'} | AEC ${settings.echoCancellation ?? '—'} / NS ${settings.noiseSuppression ?? '—'} / AGC ${settings.autoGainControl ?? '—'}`;
+                } else if (status) {
+                    status.textContent = `ورودی فعال است (${track.label || 'نامشخص'})، اما حالت منبع صدا روی گوشی دوربین است؛ این میکروفون تا تغییر حالت وارد خروجی نمی‌شود.`;
+                }
+                if (previous) previous.getTracks().forEach(t => { if (t !== track) t.stop(); });
+                candidate = null;
+                await refreshDirectorAudioInputs();
+            } catch (err) {
+                if (candidate) candidate.getTracks().forEach(t => t.stop());
+                if (status) status.textContent = `فعال‌سازی میکروفون ناموفق بود: ${err.message}`;
+            }
+        }
+
+        function setDirectorAudioDelay(value) {
+            const ms = Math.max(0, Math.min(2500, Number(value) || 0));
+            state.directorAudioDelayMs = ms;
+            const label = document.getElementById('director-audio-delay-label');
+            if (label) label.textContent = `${ms} ms`;
+            if (state.directorAudioDelayNode && state.audioCtx) {
+                state.directorAudioDelayNode.delayTime.setTargetAtTime(ms / 1000, state.audioCtx.currentTime, 0.025);
+            }
+        }
+
+        async function changeAudioSourceMode(mode) {
+            if (mode !== 'director' && mode !== 'camera') return;
+            state.audioSourceMode = mode;
+            const selector = document.getElementById('audio-source-mode');
+            if (selector) selector.value = mode;
+            const status = document.getElementById('audio-route-status');
+            if (mode === 'director') {
+                if (status) status.textContent = 'صدا از میکروفون همین گوشی وارد ضبط می‌شود؛ صدای دریافتی دوربین نادیده گرفته می‌شود.';
+                if (state.directorMicStream) {
+                    initWebAudioMixer();
+                    if (state.audioCtx?.state === 'suspended') await state.audioCtx.resume();
+                    connectStreamToAudioMixer('cam1', state.directorMicStream);
+                } else if (state.role === 'director') {
+                    await startDirectorAudioInput();
+                }
+            } else {
+                if (status) status.textContent = 'صدای میکروفون گوشی دوربین از WebRTC وارد میکس می‌شود؛ میکروفون محلی کارگردان از میکس خارج می‌شود.';
+                if (state.directorMicStream) {
+                    state.directorMicStream.getTracks().forEach(t => t.stop());
+                    state.directorMicStream = null;
+                }
+                if (state.remoteCam1Stream) connectStreamToAudioMixer('cam1', state.remoteCam1Stream);
+            }
+            if (state.role === 'director' && state.pinCode) {
+                publishMqttSignal('dir-join', { role: 'director', audioSourceMode: mode, reconnect: true });
+            }
+        }
+
         function startWebRTCStatsMonitor(pc) {
             if (state.webrtcStatsTimer) clearInterval(state.webrtcStatsTimer);
             if (!pc?.getStats) return;
@@ -1278,9 +1417,10 @@
                 };
                 const requestedAudioDeviceId = options.audioDeviceId || state.currentAudioDeviceId;
                 if (requestedAudioDeviceId) audioConstraints.deviceId = { exact: requestedAudioDeviceId };
+                // In the recommended director-mic mode, capture and transmit camera video only.
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: videoConstraints,
-                    audio: audioConstraints
+                    audio: state.remoteAudioMode === 'camera' ? audioConstraints : false
                 });
 
                 state.localCamStream = stream;
@@ -1574,7 +1714,7 @@
                         updateConnectionBadge('ready', `آماده اتصال (${pin})`);
                         publishMqttSignal('cam-online', { pin, lenses: state.availableLenses, current: state.currentDeviceId });
                     } else if (state.role === 'director') {
-                        publishMqttSignal('dir-join', { role: 'director' });
+                        publishMqttSignal('dir-join', { role: 'director', audioSourceMode: state.audioSourceMode });
                     }
                 });
             });
@@ -1637,7 +1777,7 @@
 
         function verifyAndHealConnections() {
             if (state.role === 'director' && state.pinCode) {
-                publishMqttSignal('dir-join', { role: 'director', reconnect: true });
+                publishMqttSignal('dir-join', { role: 'director', audioSourceMode: state.audioSourceMode, reconnect: true });
             } else if (state.role === 'camera' && state.pinCode) {
                 publishMqttSignal('cam-online', { pin: state.pinCode, lenses: state.availableLenses, current: state.currentDeviceId });
             }
@@ -1662,6 +1802,9 @@
                 requestScreenWakeLock();
             } else if (targetRole === 'director') {
                 document.getElementById('view-director').classList.remove('hidden');
+                const sourceSelect = document.getElementById('audio-source-mode');
+                if (sourceSelect) sourceSelect.value = state.audioSourceMode;
+                setDirectorAudioDelay(state.directorAudioDelayMs);
                 requestScreenWakeLock();
             }
         }
@@ -1705,11 +1848,19 @@
 
         async function handleCameraMqttMessage(topic, data) {
             if (topic.endsWith('/dir-join')) {
+                const requestedMode = data.audioSourceMode === 'camera' ? 'camera' : 'director';
+                const modeChanged = state.remoteAudioMode !== requestedMode;
+                state.remoteAudioMode = requestedMode;
                 publishMqttSignal('lenses', { lenses: state.availableLenses, current: state.currentDeviceId });
+                if (modeChanged && state.localCamStream) {
+                    await startHardwareCamera({ deviceId: state.currentDeviceId || undefined, height: state.currentResHeight });
+                    state.lastOfferAt = 0;
+                }
                 const existing = state.rtcPeerConn;
                 const healthy = existing && ['connected', 'connecting'].includes(existing.connectionState);
-                if (!data.reconnect && healthy) return;
-                await startCameraWebRTCOffer(Boolean(data.reconnect));
+                if (!data.reconnect && healthy && !modeChanged) return;
+                if (modeChanged) state.lastOfferAt = 0;
+                await startCameraWebRTCOffer(Boolean(data.reconnect || modeChanged));
             } else if (topic.endsWith('/webrtc-answer')) {
                 if (state.rtcPeerConn && data.sdp) {
                     try {
@@ -1737,9 +1888,12 @@
             const pc = new RTCPeerConnection(RTC_CONFIG);
             state.rtcPeerConn = pc;
 
+            state.activeVideoSender = null;
+            state.activeAudioSender = null;
             const streamToSend = getActiveCameraMediaStream();
             if (streamToSend) {
                 streamToSend.getTracks().forEach(track => {
+                    if (track.kind === 'audio' && state.remoteAudioMode !== 'camera') return;
                     const sender = pc.addTrack(track, streamToSend);
                     if (track.kind === 'video') state.activeVideoSender = sender;
                     if (track.kind === 'audio') state.activeAudioSender = sender;
@@ -1889,13 +2043,13 @@
             requestScreenWakeLock();
 
             connectMqttSignaling(pin, handleDirectorMqttMessage);
-            setTimeout(() => publishMqttSignal('dir-join', { role: 'director' }), 500);
+            setTimeout(() => publishMqttSignal('dir-join', { role: 'director', audioSourceMode: state.audioSourceMode }), 500);
         }
 
         async function handleDirectorMqttMessage(topic, data) {
             if (topic.endsWith('/cam-online')) {
                 if (data.lenses) populateRemoteLensesDropdown(data.lenses, data.current);
-                publishMqttSignal('dir-join', { role: 'director' });
+                publishMqttSignal('dir-join', { role: 'director', audioSourceMode: state.audioSourceMode });
             } else if (topic.endsWith('/lenses')) {
                 populateRemoteLensesDropdown(data.lenses, data.current);
             } else if (topic.endsWith('/cam-rotate')) {
@@ -2536,15 +2690,30 @@
 
         function connectStreamToAudioMixer(channel, stream) {
             if (!state.audioCtx || !stream || stream.getAudioTracks().length === 0) return;
+            // Director-local mode must never mix a duplicate/lagging copy of camera audio.
+            if (channel === 'cam1' && state.audioSourceMode === 'director' && stream === state.remoteCam1Stream) return;
             try {
                 if (state.sourceNodes[channel]) {
                     try { state.sourceNodes[channel].disconnect(); } catch (e) {}
                 }
-                const src = state.audioCtx.createMediaStreamSource(stream);
                 const gain = state.gainNodes[channel] || state.audioCtx.createGain();
+                try { gain.disconnect(); } catch (e) {}
+                if (state.directorAudioDelayNode) {
+                    try { state.directorAudioDelayNode.disconnect(); } catch (e) {}
+                    state.directorAudioDelayNode = null;
+                }
+                const src = state.audioCtx.createMediaStreamSource(stream);
                 gain.gain.value = state.gains[channel] ?? 1.0;
                 src.connect(gain);
-                gain.connect(state.destNode);
+                if (channel === 'cam1' && state.audioSourceMode === 'director' && stream === state.directorMicStream) {
+                    const delay = state.audioCtx.createDelay(3.0);
+                    delay.delayTime.value = Math.max(0, Math.min(2.5, state.directorAudioDelayMs / 1000));
+                    gain.connect(delay);
+                    delay.connect(state.destNode);
+                    state.directorAudioDelayNode = delay;
+                } else {
+                    gain.connect(state.destNode);
+                }
                 state.sourceNodes[channel] = src;
                 state.gainNodes[channel] = gain;
             } catch (e) {}
