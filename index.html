@@ -725,11 +725,16 @@
                     </div>
                     <div class="rounded-xl border border-amber-700/50 bg-slate-950/70 p-3 space-y-2">
                         <div class="flex justify-between gap-2 items-center">
-                            <label for="director-audio-delay" class="text-xs font-bold text-amber-300">⏱️ تأخیر صدا برای هماهنگی با تصویر</label>
+                            <label for="director-audio-delay" class="text-xs font-bold text-amber-300">⏱️ سینک خودکار صدا و تصویر</label>
+                            <button id="av-sync-mode-button" type="button" onclick="toggleAVSyncMode()" class="text-[10px] font-bold px-2 py-1 rounded bg-emerald-700 text-white">Auto Sync: روشن</button>
+                        </div>
+                        <div id="av-sync-status" aria-live="polite" class="text-[11px] leading-relaxed text-slate-300">در انتظار فریم دوربین برای اندازه‌گیری تأخیر واقعی…</div>
+                        <div class="flex justify-between gap-2 items-center">
+                            <label for="director-audio-delay" class="text-[11px] text-slate-300">تأخیر اعمال‌شده</label>
                             <span id="director-audio-delay-label" class="font-mono text-xs text-amber-200">1000 ms</span>
                         </div>
-                        <input id="director-audio-delay" type="range" min="0" max="2500" step="50" value="1000" oninput="setDirectorAudioDelay(this.value)" class="w-full accent-amber-400">
-                        <div class="text-[10px] text-slate-400">از ۰ تا ۲۵۰۰ میلی‌ثانیه تنظیم کن. مقدار دقیق را با تست دست‌زدن/کِلَپ و فایل ضبط‌شده تنظیم کن؛ ۱۰۰۰ms فقط نقطه شروع است.</div>
+                        <input id="director-audio-delay" type="range" min="0" max="2500" step="25" value="1000" oninput="setDirectorAudioDelay(this.value, true)" class="w-full accent-amber-400">
+                        <div class="text-[10px] text-slate-400">در حالت خودکار، تأخیر از metadata زمان ثبت فریم دریافت‌شده تخمین زده می‌شود. اگر مرورگر این اطلاعات را ندهد، حالت دستی لازم است؛ تضمین سینک بی‌نقص فقط با تست فایل نهایی ممکن است.</div>
                     </div>
                     <div class="space-y-3">
                         <div class="space-y-1">
@@ -782,11 +787,12 @@
     </div>
 
     <!-- Hidden Media Elements for Mixing Engine -->
-    <div class="hidden">
-        <video id="hidden-cam1-video" autoplay playsinline muted></video>
-        <video id="hidden-cam2-video" autoplay playsinline muted></video>
-        <video id="hidden-media-video" playsinline preload="metadata" crossorigin="anonymous"></video>
-        <img id="hidden-media-img" alt="">
+    <!-- Keep source videos composited (tiny + transparent) so requestVideoFrameCallback can report remote-frame capture timing. -->
+    <div aria-hidden="true" style="position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.01;overflow:hidden;pointer-events:none;z-index:2147483647">
+        <video id="hidden-cam1-video" autoplay playsinline muted style="width:2px;height:2px"></video>
+        <video id="hidden-cam2-video" autoplay playsinline muted style="width:2px;height:2px"></video>
+        <video id="hidden-media-video" playsinline preload="metadata" crossorigin="anonymous" style="width:2px;height:2px"></video>
+        <img id="hidden-media-img" alt="" style="width:1px;height:1px">
     </div>
 
     <!-- ================= APPLICATION LOGIC (v4.5 Turbo: Zero-Lag + WakeLock + Auto-Reconnect) ================= -->
@@ -838,6 +844,16 @@
             directorAudioDeviceId: '',
             directorAudioDelayMs: 1000,
             directorAudioDelayNode: null,
+            avSyncMode: 'auto',
+            avSyncVideoElement: null,
+            avSyncCallbackId: null,
+            avSyncSamples: [],
+            avSyncLastApplyAt: 0,
+            avSyncLastStatusAt: 0,
+            avSyncCaptureTimeSupported: null,
+            avSyncInitialCalibrationComplete: false,
+            avSyncFrameCount: 0,
+            avSyncLastCaptureAgeMs: null,
             webrtcStatsTimer: null,
             lastAudioStatSnapshot: {},
             webrtcDisconnectedSince: 0,
@@ -1260,14 +1276,147 @@
             }
         }
 
-        function setDirectorAudioDelay(value) {
-            const ms = Math.max(0, Math.min(2500, Number(value) || 0));
-            state.directorAudioDelayMs = ms;
-            const label = document.getElementById('director-audio-delay-label');
-            if (label) label.textContent = `${ms} ms`;
-            if (state.directorAudioDelayNode && state.audioCtx) {
-                state.directorAudioDelayNode.delayTime.setTargetAtTime(ms / 1000, state.audioCtx.currentTime, 0.025);
+        function updateAVSyncModeUi() {
+            const button = document.getElementById('av-sync-mode-button');
+            const status = document.getElementById('av-sync-status');
+            if (button) {
+                const automatic = state.avSyncMode === 'auto';
+                button.textContent = automatic ? 'Auto Sync: روشن' : 'حالت دستی';
+                button.className = automatic
+                    ? 'text-[10px] font-bold px-2 py-1 rounded bg-emerald-700 text-white'
+                    : 'text-[10px] font-bold px-2 py-1 rounded bg-amber-700 text-white';
             }
+            if (status && state.avSyncMode === 'manual') {
+                status.textContent = state.avSyncCaptureTimeSupported === false
+                    ? 'مرورگر زمان ثبت فریم دوربین را ارائه نمی‌کند؛ تأخیر را دستی تنظیم کن.'
+                    : `حالت دستی فعال است. تأخیر آخرین اندازه‌گیری: ${state.avSyncLastCaptureAgeMs == null ? 'نامشخص' : Math.round(state.avSyncLastCaptureAgeMs) + 'ms'}.`;
+            }
+        }
+
+        function setDirectorAudioDelay(value, userChanged = false, autoUpdate = false) {
+            const ms = Math.max(0, Math.min(2500, Number(value) || 0));
+            if (userChanged && !autoUpdate) state.avSyncMode = 'manual';
+            state.directorAudioDelayMs = ms;
+            const slider = document.getElementById('director-audio-delay');
+            const label = document.getElementById('director-audio-delay-label');
+            if (slider && Number(slider.value) !== ms) slider.value = String(ms);
+            if (label) label.textContent = `${Math.round(ms)} ms`;
+            if (state.directorAudioDelayNode && state.audioCtx) {
+                // Smooth parameter changes to avoid clicks / abrupt time jumps.
+                state.directorAudioDelayNode.delayTime.setTargetAtTime(ms / 1000, state.audioCtx.currentTime, 0.12);
+            }
+            updateAVSyncModeUi();
+        }
+
+        function toggleAVSyncMode() {
+            if (state.avSyncMode === 'auto') {
+                state.avSyncMode = 'manual';
+                updateAVSyncModeUi();
+                const status = document.getElementById('av-sync-status');
+                if (status) status.textContent = `حالت دستی؛ تأخیر روی ${Math.round(state.directorAudioDelayMs)}ms نگه داشته شد.`;
+                return;
+            }
+            state.avSyncMode = 'auto';
+            state.avSyncSamples = [];
+            state.avSyncLastApplyAt = 0;
+            updateAVSyncModeUi();
+            const video = document.getElementById('hidden-cam1-video');
+            if (video && video.srcObject) startAVSyncEngine(video);
+            else {
+                const status = document.getElementById('av-sync-status');
+                if (status) status.textContent = 'برای اندازه‌گیری خودکار، ابتدا دوربین بی‌سیم را متصل کن.';
+            }
+        }
+
+        function medianNumber(values) {
+            if (!values.length) return null;
+            const sorted = [...values].sort((a, b) => a - b);
+            const middle = Math.floor(sorted.length / 2);
+            return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+        }
+
+        function stopAVSyncEngine() {
+            const video = state.avSyncVideoElement;
+            if (video && state.avSyncCallbackId != null && typeof video.cancelVideoFrameCallback === 'function') {
+                try { video.cancelVideoFrameCallback(state.avSyncCallbackId); } catch (e) {}
+            }
+            state.avSyncVideoElement = null;
+            state.avSyncCallbackId = null;
+            state.avSyncSamples = [];
+        }
+
+        function startAVSyncEngine(videoEl) {
+            if (!videoEl || typeof videoEl.requestVideoFrameCallback !== 'function') {
+                state.avSyncCaptureTimeSupported = false;
+                const status = document.getElementById('av-sync-status');
+                if (status) status.textContent = 'این مرورگر requestVideoFrameCallback را پشتیبانی نمی‌کند؛ تأخیر دستی را استفاده کن.';
+                updateAVSyncModeUi();
+                return;
+            }
+            if (state.avSyncVideoElement === videoEl && state.avSyncCallbackId != null) return;
+            stopAVSyncEngine();
+            state.avSyncVideoElement = videoEl;
+            state.avSyncCaptureTimeSupported = null;
+            state.avSyncLastCaptureAgeMs = null;
+            state.avSyncSamples = [];
+            state.avSyncInitialCalibrationComplete = false;
+            state.avSyncFrameCount = 0;
+            const status = document.getElementById('av-sync-status');
+            if (status) status.textContent = 'در حال نمونه‌برداری از timestamp فریم‌های دوربین…';
+
+            const onFrame = (now, metadata) => {
+                if (state.avSyncVideoElement !== videoEl || !videoEl.srcObject) return;
+                state.avSyncFrameCount += 1;
+                const captureTime = metadata && metadata.captureTime;
+                if (Number.isFinite(captureTime)) {
+                    // MDN documents remote WebRTC captureTime as a receiver-clock timestamp
+                    // mapped via RTCP sender reports; comparing with rVFC `now` estimates frame age.
+                    const ageMs = now - captureTime;
+                    if (Number.isFinite(ageMs) && ageMs >= -100 && ageMs <= 8000) {
+                        state.avSyncCaptureTimeSupported = true;
+                        state.avSyncLastCaptureAgeMs = Math.max(0, ageMs);
+                        state.avSyncSamples.push(Math.max(0, ageMs));
+                        if (state.avSyncSamples.length > 31) state.avSyncSamples.shift();
+                        const estimate = medianNumber(state.avSyncSamples.slice(-21));
+                        const enoughSamples = state.avSyncSamples.length >= 7;
+                        const updateInterval = state.isRecording ? 1000 : 300;
+                        const timeToUpdate = now - state.avSyncLastApplyAt >= updateInterval;
+                        if (state.avSyncMode === 'auto' && state.audioSourceMode === 'director' && enoughSamples && timeToUpdate && estimate != null) {
+                            const current = state.directorAudioDelayMs;
+                            let target;
+                            if (!state.avSyncInitialCalibrationComplete) {
+                                // Calibrate before recording when possible; an abrupt first correction
+                                // is avoided during recording to reduce audible delay modulation.
+                                target = Math.max(0, Math.min(2500, estimate));
+                                state.avSyncInitialCalibrationComplete = true;
+                            } else {
+                                const maxStep = state.isRecording ? 20 : 100;
+                                const delta = Math.max(-maxStep, Math.min(maxStep, estimate - current));
+                                target = Math.max(0, Math.min(2500, current + delta));
+                            }
+                            setDirectorAudioDelay(target, false, true);
+                            state.avSyncLastApplyAt = now;
+                        }
+                        if (status && now - state.avSyncLastStatusAt >= 500) {
+                            const method = enoughSamples ? 'در حال اندازه‌گیری خودکار' : 'در حال کالیبراسیون';
+                            const suffix = state.audioSourceMode !== 'director' ? '؛ برای اعمال سینک، منبع صدا را روی گوشی کارگردان بگذار.' : '';
+                            status.textContent = `${method} | سن تصویر ≈ ${Math.round(estimate ?? ageMs)}ms | تأخیر صدا ${Math.round(state.directorAudioDelayMs)}ms${suffix}`;
+                            state.avSyncLastStatusAt = now;
+                        }
+                    }
+                }
+                if (state.avSyncCaptureTimeSupported !== true && state.avSyncFrameCount >= 15 && state.avSyncSamples.length === 0) {
+                    state.avSyncCaptureTimeSupported = false;
+                    if (status && now - state.avSyncLastStatusAt >= 1000) {
+                        status.textContent = 'مرورگر timestamp معتبر captureTime نمی‌دهد؛ سینک خودکار دقیق قابل محاسبه نیست. حالت دستی را استفاده کن.';
+                        state.avSyncLastStatusAt = now;
+                    }
+                }
+                if (typeof videoEl.requestVideoFrameCallback === 'function' && videoEl.srcObject) {
+                    state.avSyncCallbackId = videoEl.requestVideoFrameCallback(onFrame);
+                }
+            };
+            state.avSyncCallbackId = videoEl.requestVideoFrameCallback(onFrame);
         }
 
         async function changeAudioSourceMode(mode) {
@@ -1805,11 +1954,15 @@
                 const sourceSelect = document.getElementById('audio-source-mode');
                 if (sourceSelect) sourceSelect.value = state.audioSourceMode;
                 setDirectorAudioDelay(state.directorAudioDelayMs);
+                updateAVSyncModeUi();
+                const remoteVideo = document.getElementById('hidden-cam1-video');
+                if (remoteVideo && remoteVideo.srcObject) startAVSyncEngine(remoteVideo);
                 requestScreenWakeLock();
             }
         }
 
         function cleanupConnections() {
+            stopAVSyncEngine();
             state.bokehProcessingActive = false;
             if (state.webrtcStatsTimer) { clearInterval(state.webrtcStatsTimer); state.webrtcStatsTimer = null; }
             if (state.heartbeatTimer) { clearInterval(state.heartbeatTimer); state.heartbeatTimer = null; }
@@ -2111,6 +2264,8 @@
                 v1.srcObject = stream;
                 v1.muted = true;
                 v1.play().catch(() => {});
+                // Measure age of decoded remote camera frames for auto audio-delay compensation.
+                startAVSyncEngine(v1);
                 connectStreamToAudioMixer('cam1', stream);
             }
             updateConnectionBadge('connected', 'دوربین ۱ متصل شد (بدون لگ)');
