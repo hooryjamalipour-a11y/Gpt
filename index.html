@@ -326,6 +326,16 @@
 
         <!-- Camera Bottom Pro Controls -->
         <div class="relative z-40 bg-studio-900/95 border-t border-slate-800 p-3 flex flex-col gap-2.5">
+            <div class="rounded-xl border border-emerald-700/50 bg-slate-950/90 px-3 py-2 space-y-1.5">
+                <div class="flex items-center justify-between gap-2">
+                    <label for="cam-audio-input-select" class="text-[11px] font-bold text-emerald-300">🎙️ ورودی میکروفون همین گوشی</label>
+                    <button type="button" onclick="refreshAudioInputs()" class="text-[10px] px-2 py-1 rounded bg-slate-800 text-slate-200">🔄 تازه‌سازی</button>
+                </div>
+                <select id="cam-audio-input-select" onchange="changeAudioInput(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white">
+                    <option value="">میکروفون پیش‌فرض گوشی</option>
+                </select>
+                <div id="audio-input-status" class="text-[10px] leading-relaxed text-slate-400">میکروفون خارجی را وصل کن؛ سپس تازه‌سازی و ورودی درست را انتخاب کن.</div>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <!-- Zoom Control -->
                 <div class="bg-slate-950/80 border border-slate-800 rounded-xl px-3 py-2 flex items-center gap-2">
@@ -692,16 +702,10 @@
 
                 <!-- TAB 4: Audio Mixer -->
                 <div id="tab-content-audio" class="hidden p-3 space-y-3 flex-1 flex flex-col justify-between">
-                    <div class="rounded-xl border border-emerald-700/50 bg-slate-950/70 p-3 space-y-2">
-                        <div class="flex items-center justify-between gap-2">
-                            <label for="audio-input-select" class="text-xs font-bold text-emerald-300">🎙️ ورودی میکروفون دوربین</label>
-                            <button type="button" onclick="refreshAudioInputs()" class="text-[11px] px-2 py-1 rounded bg-slate-800 text-slate-200">🔄 تازه‌سازی</button>
-                        </div>
-                        <select id="audio-input-select" onchange="changeAudioInput(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white">
-                            <option value="">میکروفون پیش‌فرض گوشی</option>
-                        </select>
-                        <div id="audio-input-status" class="text-[11px] text-slate-400">میکروفون خارجی را وصل کن، تازه‌سازی را بزن و ورودی آن را انتخاب کن.</div>
-                        <div id="webrtc-stats-status" class="text-[11px] text-slate-400">آمار شبکه پس از اتصال نمایش داده می‌شود.</div>
+                    <div class="rounded-xl border border-blue-700/50 bg-slate-950/70 p-3 space-y-2">
+                        <div class="text-xs font-bold text-blue-300">📡 وضعیت انتقال صدای دوربین ۱</div>
+                        <div id="webrtc-stats-status" class="text-[11px] leading-relaxed text-slate-300">آمار صوتی پس از اتصال دوربین نمایش داده می‌شود.</div>
+                        <div class="text-[10px] text-slate-500">انتخاب میکروفون خارجی باید روی خود گوشیِ دوربین انجام شود.</div>
                     </div>
                     <div class="space-y-3">
                         <div class="space-y-1">
@@ -805,6 +809,10 @@
             currentAudioDeviceId: '',
             availableAudioInputs: [],
             webrtcStatsTimer: null,
+            lastAudioStatSnapshot: {},
+            webrtcDisconnectedSince: 0,
+            lastRecoveryAt: 0,
+            lastOfferAt: 0,
             availableLenses: [],
             currentDeviceId: '',
             currentFacingMode: 'environment',
@@ -1033,32 +1041,36 @@
         // ============================================================================
         async function enforceLowLatencyWebRTC(pc) {
             if (!pc) return;
-            try {
-                // Tune outgoing bitrate based on resolution so mobile networks never choke
-                const targetBitrate = state.currentResHeight >= 1080 ? 4000000 :
-                                      state.currentResHeight >= 720 ? 2200000 : 1000000;
-
-                const senders = pc.getSenders();
-                for (const sender of senders) {
-                    if (sender.track && sender.track.kind === 'video') {
-                        state.activeVideoSender = sender;
-                        if ('contentHint' in sender.track) {
-                            sender.track.contentHint = 'motion';
-                        }
+            const targetVideoBitrate = state.currentResHeight >= 1080 ? 4000000 :
+                                       state.currentResHeight >= 720 ? 2200000 : 1000000;
+            for (const sender of pc.getSenders()) {
+                if (!sender.track) continue;
+                if (sender.track.kind === 'video') {
+                    state.activeVideoSender = sender;
+                    try {
+                        if ('contentHint' in sender.track) sender.track.contentHint = 'motion';
                         const params = sender.getParameters();
-                        if (!params.encodings || params.encodings.length === 0) {
-                            params.encodings = [{}];
-                        }
-                        params.encodings[0].maxBitrate = targetBitrate;
+                        if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+                        params.encodings[0].maxBitrate = targetVideoBitrate;
                         params.encodings[0].maxFramerate = 30;
-                        params.encodings[0].networkPriority = 'high';
+                        // Reserve the higher RTP/network priority for audio under congestion.
+                        params.encodings[0].priority = 'low';
+                        params.encodings[0].networkPriority = 'low';
                         params.degradationPreference = 'balanced';
                         await sender.setParameters(params);
-                    } else if (sender.track && sender.track.kind === 'audio') {
-                        state.activeAudioSender = sender;
-                    }
+                    } catch (e) { /* The browser may not support all optional sender parameters. */ }
+                } else if (sender.track.kind === 'audio') {
+                    state.activeAudioSender = sender;
+                    try {
+                        const params = sender.getParameters();
+                        if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+                        params.encodings[0].maxBitrate = 96000;
+                        params.encodings[0].priority = 'high';
+                        params.encodings[0].networkPriority = 'high';
+                        await sender.setParameters(params);
+                    } catch (e) { /* Keep browser defaults if the audio parameters are unsupported. */ }
                 }
-            } catch (e) {}
+            }
         }
 
         // A modest playout buffer is safer than forcing zero and risking audio dropouts.
@@ -1076,50 +1088,75 @@
 
         async function refreshAudioInputs() {
             const status = document.getElementById('audio-input-status');
-            const select = document.getElementById('audio-input-select');
+            const select = document.getElementById('cam-audio-input-select');
             if (!navigator.mediaDevices?.enumerateDevices || !select) return;
             try {
-                if (!state.localCamStream || !state.rawAudioTrack) {
-                    const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                    permissionStream.getTracks().forEach(t => t.stop());
-                }
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 state.availableAudioInputs = devices.filter(d => d.kind === 'audioinput');
-                const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-                select.innerHTML = state.availableAudioInputs.map((d, i) =>
+                const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+                select.innerHTML = '<option value="">میکروفون پیش‌فرض سیستم</option>' + state.availableAudioInputs.map((d, i) =>
                     `<option value="${esc(d.deviceId)}">${esc(d.label || `ورودی صدا ${i + 1}`)}</option>`
                 ).join('');
                 const activeId = state.rawAudioTrack?.getSettings?.().deviceId || state.currentAudioDeviceId;
-                if (activeId && state.availableAudioInputs.some(d => d.deviceId === activeId)) select.value = activeId;
-                else if (state.availableAudioInputs.length) select.selectedIndex = 0;
+                select.value = activeId && state.availableAudioInputs.some(d => d.deviceId === activeId) ? activeId : '';
                 if (status) status.textContent = state.availableAudioInputs.length
-                    ? `تعداد ورودی‌های صدا: ${state.availableAudioInputs.length}. ورودی فعال را انتخاب و بررسی کن.`
-                    : 'هیچ ورودی صوتی پیدا نشد.';
+                    ? `ورودی‌های قابل انتخاب: ${state.availableAudioInputs.length}. ورودی فعال را انتخاب کن؛ بعد از انتخاب، نام و وضعیت واقعی ترک نمایش داده می‌شود.`
+                    : 'ورودی صوتی گزارش نشده؛ مجوز میکروفون و اتصال فیزیکی را بررسی کن.';
             } catch (err) {
-                if (status) status.textContent = `دسترسی به ورودی صدا ناموفق بود: ${err.message}`;
+                if (status) status.textContent = `فهرست ورودی‌ها قابل خواندن نیست: ${err.message}`;
             }
         }
 
         async function changeAudioInput(deviceId) {
-            state.currentAudioDeviceId = deviceId || '';
             const status = document.getElementById('audio-input-status');
-            if (status) status.textContent = 'در حال تغییر ورودی صدا…';
-            if (state.role !== 'launcher') {
-                if (status) status.textContent = 'این انتخاب برای میکروفون گوشی دوربین است؛ گوشی دوربین باید ورودی خارجی را انتخاب کند.';
+            const select = document.getElementById('cam-audio-input-select');
+            if (state.role !== 'camera') {
+                if (status) status.textContent = 'برای تغییر میکروفون گوشی دوربین، این تنظیم را روی گوشی‌ای انجام بده که به آن میکروفون وصل است.';
                 return;
             }
-            const ok = await startHardwareCamera({
-                deviceId: state.currentDeviceId || undefined,
-                audioDeviceId: state.currentAudioDeviceId || undefined,
-                height: state.currentResHeight
-            });
-            if (ok) await startCameraWebRTCOffer();
-            const activeTrack = state.rawAudioTrack;
-            const settings = activeTrack?.getSettings?.() || {};
-            const selected = state.availableAudioInputs.find(d => d.deviceId === settings.deviceId);
-            if (status) status.textContent = activeTrack
-                ? `ورودی فعال: ${selected?.label || activeTrack.label || 'نامشخص'} | نرخ نمونه: ${settings.sampleRate || 'نامشخص'} Hz | حذف نویز: ${settings.noiseSuppression ?? 'نامشخص'} | گین خودکار: ${settings.autoGainControl ?? 'نامشخص'}`
-                : 'ترک صدای فعال پیدا نشد.';
+            if (status) status.textContent = 'در حال بازکردن ورودی صوتی انتخاب‌شده…';
+            let candidateStream = null;
+            try {
+                const audio = {
+                    echoCancellation: { ideal: false },
+                    noiseSuppression: { ideal: false },
+                    autoGainControl: { ideal: false }
+                };
+                if (deviceId) audio.deviceId = { exact: deviceId };
+                candidateStream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+                const newTrack = candidateStream.getAudioTracks()[0];
+                if (!newTrack) throw new Error('مرورگر ترک صوتی نساخت.');
+                const oldTrack = state.rawAudioTrack;
+                const pc = state.rtcPeerConn;
+                if (state.activeAudioSender && pc && pc.signalingState !== 'closed') {
+                    await state.activeAudioSender.replaceTrack(newTrack);
+                }
+                // Keep the same camera/video capture alive; replace only the audio track.
+                if (state.localCamStream) {
+                    if (oldTrack) state.localCamStream.removeTrack(oldTrack);
+                    state.localCamStream.addTrack(newTrack);
+                }
+                state.rawAudioTrack = newTrack;
+                const settings = newTrack.getSettings ? newTrack.getSettings() : {};
+                state.currentAudioDeviceId = settings.deviceId || deviceId || '';
+                if (oldTrack && oldTrack !== newTrack) oldTrack.stop();
+                const selected = state.availableAudioInputs.find(d => d.deviceId === settings.deviceId);
+                if (select) select.value = state.currentAudioDeviceId;
+                const flags = [];
+                if (settings.echoCancellation === true) flags.push('AEC روشن');
+                if (settings.noiseSuppression === true) flags.push('کاهش نویز روشن');
+                if (settings.autoGainControl === true) flags.push('گین خودکار روشن');
+                if (status) status.textContent = `ورودی فعال: ${selected?.label || newTrack.label || (deviceId ? 'ورودی انتخاب‌شده' : 'پیش‌فرض سیستم')} | ${settings.sampleRate || 'نرخ نمونه نامشخص'} Hz | ${settings.channelCount || '?'} کانال | ${flags.length ? flags.join('، ') : 'پردازش خودکار صدا طبق گزارش مرورگر خاموش/نامشخص'}`;
+                candidateStream = null; // Track now belongs to the active camera stream; do not stop it here.
+                newTrack.onended = () => {
+                    const el = document.getElementById('audio-input-status');
+                    if (el) el.textContent = 'هشدار: ورودی میکروفون متوقف یا جدا شد. میکروفون را وصل و ورودی را دوباره انتخاب کن.';
+                };
+            } catch (err) {
+                if (candidateStream) candidateStream.getTracks().forEach(t => t.stop());
+                if (status) status.textContent = `انتخاب میکروفون انجام نشد؛ ورودی قبلی حفظ شد. خطا: ${err.message}`;
+                if (select) select.value = state.currentAudioDeviceId || '';
+            }
         }
 
         function startWebRTCStatsMonitor(pc) {
@@ -1132,21 +1169,65 @@
                     return;
                 }
                 try {
-                    const stats = await pc.getStats();
-                    let rtt = null, lost = null, jitter = null;
-                    stats.forEach(s => {
-                        if (s.type === 'candidate-pair' && s.state === 'succeeded' && s.nominated &&
-                            typeof s.currentRoundTripTime === 'number') rtt = Math.round(s.currentRoundTripTime * 1000);
-                        if (s.type === 'inbound-rtp' && !s.isRemote) {
-                            if (typeof s.packetsLost === 'number') lost = s.packetsLost;
-                            if (typeof s.jitter === 'number') jitter = Math.round(s.jitter * 1000);
-                        }
+                    const report = await pc.getStats();
+                    let audioIn = null, audioOut = null, remoteAudio = null;
+                    let selectedPair = null, selectedTransport = null;
+                    report.forEach(s => {
+                        const kind = s.kind || s.mediaType;
+                        if (s.type === 'inbound-rtp' && kind === 'audio' && !s.isRemote) audioIn = s;
+                        if (s.type === 'outbound-rtp' && kind === 'audio' && !s.isRemote) audioOut = s;
+                        if (s.type === 'remote-inbound-rtp' && kind === 'audio') remoteAudio = s;
+                        if (s.type === 'transport' && s.selectedCandidatePairId) selectedTransport = s;
                     });
+                    if (selectedTransport) selectedPair = report.get(selectedTransport.selectedCandidatePairId);
+                    if (!selectedPair) report.forEach(s => {
+                        if (s.type === 'candidate-pair' && s.state === 'succeeded' && s.nominated) selectedPair = s;
+                    });
+                    const localCandidate = selectedPair?.localCandidateId ? report.get(selectedPair.localCandidateId) : null;
+                    const remoteCandidate = selectedPair?.remoteCandidateId ? report.get(selectedPair.remoteCandidateId) : null;
+                    const rtt = typeof selectedPair?.currentRoundTripTime === 'number' ? Math.round(selectedPair.currentRoundTripTime * 1000) : null;
+                    const inJitter = typeof audioIn?.jitter === 'number' ? Math.round(audioIn.jitter * 1000) : null;
+                    const inLost = typeof audioIn?.packetsLost === 'number' ? audioIn.packetsLost : null;
+                    const avgBuffer = audioIn && audioIn.jitterBufferEmittedCount > 0 && typeof audioIn.jitterBufferDelay === 'number'
+                        ? Math.round(1000 * audioIn.jitterBufferDelay / audioIn.jitterBufferEmittedCount) : null;
+                    const concealments = typeof audioIn?.concealmentEvents === 'number' ? audioIn.concealmentEvents : null;
+                    const remoteLoss = typeof remoteAudio?.fractionLost === 'number' ? `${(remoteAudio.fractionLost * 100).toFixed(1)}%` : null;
+                    const route = localCandidate && remoteCandidate ? `${localCandidate.candidateType || '?'}→${remoteCandidate.candidateType || '?'}` : 'نامشخص';
+                    const audioStat = audioIn || audioOut;
+                    let kbps = null;
+                    if (audioStat && typeof audioStat.bytesReceived === 'number') {
+                        const key = audioStat.id;
+                        const now = performance.now();
+                        const old = state.lastAudioStatSnapshot[key];
+                        if (old && now > old.t) kbps = Math.max(0, Math.round((audioStat.bytesReceived - old.bytes) * 8 / (now - old.t)));
+                        state.lastAudioStatSnapshot = { [key]: { bytes: audioStat.bytesReceived, t: now } };
+                    } else if (audioOut && typeof audioOut.bytesSent === 'number') {
+                        const key = audioOut.id;
+                        const now = performance.now();
+                        const old = state.lastAudioStatSnapshot[key];
+                        if (old && now > old.t) kbps = Math.max(0, Math.round((audioOut.bytesSent - old.bytes) * 8 / (now - old.t)));
+                        state.lastAudioStatSnapshot = { [key]: { bytes: audioOut.bytesSent, t: now } };
+                    }
                     const el = document.getElementById('webrtc-stats-status');
-                    if (el) el.textContent = `شبکه: RTT ${rtt == null ? '—' : rtt + 'ms'} | Jitter ${jitter == null ? '—' : jitter + 'ms'} | بسته ازدست‌رفته ${lost == null ? '—' : lost}`;
-                } catch (e) {}
+                    if (el) {
+                        const parts = [
+                            `نرخ صوت ${kbps == null ? '—' : kbps + ' kbps'}`,
+                            `مسیر ${route}`,
+                            `RTT ${rtt == null ? '—' : rtt + 'ms'}`,
+                            `Jitter صوتی ${inJitter == null ? '—' : inJitter + 'ms'}`,
+                            `بافر پخش ${avgBuffer == null ? '—' : avgBuffer + 'ms'}`,
+                            `افت بسته صوتی ${inLost == null ? (remoteLoss || '—') : inLost}`,
+                            `concealment ${concealments == null ? '—' : concealments}`
+                        ];
+                        el.textContent = parts.join(' | ');
+                    }
+                } catch (e) {
+                    const el = document.getElementById('webrtc-stats-status');
+                    if (el) el.textContent = `خواندن آمار شبکه ناموفق بود: ${e.message}`;
+                }
             }, 2000);
         }
+
         // ============================================================================
         // 5. PHYSICAL LENS ENUMERATION & HARDWARE CAMERA ENGINE
         // ============================================================================
@@ -1532,12 +1613,23 @@
                 if (state.role === 'launcher' || !state.pinCode) return;
                 publishMqttSignal('ping', { role: state.role });
 
-                // Auto-heal WebRTC if connection dropped
+                // A transient ICE "disconnected" can recover by itself. Avoid tearing down audio every 4s.
                 if (state.rtcPeerConn) {
+                    const now = Date.now();
                     const st = state.rtcPeerConn.connectionState;
                     const iceSt = state.rtcPeerConn.iceConnectionState;
-                    if (st === 'failed' || st === 'disconnected' || iceSt === 'failed' || iceSt === 'disconnected') {
-                        verifyAndHealConnections();
+                    const failed = st === 'failed' || iceSt === 'failed';
+                    const disconnected = st === 'disconnected' || iceSt === 'disconnected';
+                    if (st === 'connected' && iceSt === 'connected') {
+                        state.webrtcDisconnectedSince = 0;
+                    } else if (disconnected || failed) {
+                        if (!state.webrtcDisconnectedSince) state.webrtcDisconnectedSince = now;
+                        const stableOutage = now - state.webrtcDisconnectedSince >= 8000;
+                        const cooldownPassed = now - state.lastRecoveryAt >= 12000;
+                        if ((failed || stableOutage) && cooldownPassed) {
+                            state.lastRecoveryAt = now;
+                            verifyAndHealConnections();
+                        }
                     }
                 }
             }, 4000);
@@ -1576,6 +1668,7 @@
 
         function cleanupConnections() {
             state.bokehProcessingActive = false;
+            if (state.webrtcStatsTimer) { clearInterval(state.webrtcStatsTimer); state.webrtcStatsTimer = null; }
             if (state.heartbeatTimer) { clearInterval(state.heartbeatTimer); state.heartbeatTimer = null; }
             if (state.rtcPeerConn) { try { state.rtcPeerConn.close(); } catch(e){} state.rtcPeerConn = null; }
             if (state.mqttClient) { try { state.mqttClient.end(true); } catch(e){} state.mqttClient = null; }
@@ -1613,7 +1706,10 @@
         async function handleCameraMqttMessage(topic, data) {
             if (topic.endsWith('/dir-join')) {
                 publishMqttSignal('lenses', { lenses: state.availableLenses, current: state.currentDeviceId });
-                await startCameraWebRTCOffer();
+                const existing = state.rtcPeerConn;
+                const healthy = existing && ['connected', 'connecting'].includes(existing.connectionState);
+                if (!data.reconnect && healthy) return;
+                await startCameraWebRTCOffer(Boolean(data.reconnect));
             } else if (topic.endsWith('/webrtc-answer')) {
                 if (state.rtcPeerConn && data.sdp) {
                     try {
@@ -1631,8 +1727,13 @@
             }
         }
 
-        async function startCameraWebRTCOffer() {
-            if (state.rtcPeerConn) { try { state.rtcPeerConn.close(); } catch(e){} }
+        async function startCameraWebRTCOffer(forceReconnect = false) {
+            const now = Date.now();
+            const existing = state.rtcPeerConn;
+            if (existing && ['connected', 'connecting'].includes(existing.connectionState) && !forceReconnect) return;
+            if (now - state.lastOfferAt < 10000) return;
+            state.lastOfferAt = now;
+            if (existing) { try { existing.close(); } catch(e){} }
             const pc = new RTCPeerConnection(RTC_CONFIG);
             state.rtcPeerConn = pc;
 
@@ -1655,7 +1756,7 @@
                     startWebRTCStatsMonitor(pc);
                     updateConnectionBadge('connected', 'روی آنتن • متصل به کارگردان');
                 } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                    updateConnectionBadge('ready', 'در حال بازیابی خودکار ارتباط...');
+                    updateConnectionBadge('ready', 'اتصال ناپایدار؛ در حال پایش برای بازیابی…');
                 }
             };
 
@@ -1838,8 +1939,7 @@
                     startWebRTCStatsMonitor(pc);
                     updateConnectionBadge('connected', 'دوربین ۱ متصل شد');
                 } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                    updateConnectionBadge('ready', 'تلاش مجدد برای اتصال دوربین ۱...');
-                    verifyAndHealConnections();
+                    updateConnectionBadge('ready', 'اتصال ناپایدار؛ در حال پایش برای بازیابی…');
                 }
             };
 
