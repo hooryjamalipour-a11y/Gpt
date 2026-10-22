@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101114">
+<title>Director Duo</title>
+
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#101114;color:white;font-family:Arial,sans-serif}
+header{padding:16px;text-align:center;background:#191a20;font-size:22px;font-weight:bold}
+main{max-width:900px;margin:auto;padding:12px}
+.screen{position:relative;background:#000;width:100%;aspect-ratio:16/9;overflow:hidden;border-radius:12px}
+.screen video,.screen canvas{position:absolute;width:100%;height:100%;object-fit:contain}
+#camera{z-index:1}
+#clip{z-index:2;display:none}
+#output{z-index:3;display:none}
+#pip{position:absolute;z-index:4;right:3%;bottom:4%;width:30%;aspect-ratio:16/9;border:2px solid white;background:#000;display:none}
+.controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}
+button,.filebtn{background:#292b34;border:1px solid #454854;color:white;padding:13px 8px;border-radius:9px;font-size:15px;cursor:pointer;text-align:center}
+button:active{background:#454854}
+.primary{background:#087f8c}
+.danger{background:#a52b39}
+input[type=file]{display:none}
+.panel{margin-top:14px;padding:14px;background:#191a20;border-radius:12px}
+h3{margin-top:0}
+label{display:block;margin:12px 0 6px}
+input[type=range]{width:100%}
+#playlist{padding:0;list-style:none}
+#playlist li{padding:10px;margin:6px 0;background:#292b34;border-radius:8px;display:flex;justify-content:space-between;gap:8px}
+#status{color:#62e6bd;font-size:14px}
+.small{font-size:12px;color:#aaa;line-height:1.8}
+</style>
+</head>
+
+<body>
+<header>🎬 DIRECTOR DUO</header>
+
+<main>
+  <div class="screen" id="screen">
+    <video id="camera" autoplay muted playsinline></video>
+    <video id="clip" playsinline></video>
+    <canvas id="output"></canvas>
+    <video id="pip" autoplay muted playsinline></video>
+  </div>
+
+  <div class="controls">
+    <button class="primary" id="startCamera">📷 روشن کردن دوربین</button>
+    <button id="switchCamera">🔄 دوربین جلو / عقب</button>
+    <label class="filebtn">🎞️ افزودن ویدیو
+      <input id="files" type="file" accept="video/*" multiple>
+    </label>
+    <button id="play">▶️ پخش ویدیو</button>
+    <button id="pause">⏸️ توقف ویدیو</button>
+    <button id="stopClip">⏹️ قطع ویدیو و صدا</button>
+    <button id="viewCamera">📷 فقط دوربین</button>
+    <button id="viewClip">🎞️ فقط ویدیو</button>
+    <button id="viewSplit">◫ تصویر نصف‌نصف</button>
+    <button id="viewReact">🎭 تصویر واکنشی</button>
+    <button id="black">⬛ صفحه سیاه</button>
+    <button id="restore">↩️ بازگشت به دوربین</button>
+    <button class="primary" id="record">⏺️ شروع ضبط خروجی</button>
+    <button class="danger" id="stopRecord">⏹️ پایان ضبط</button>
+    <button id="fullscreen">⛶ تمام صفحه</button>
+  </div>
+
+  <section class="panel">
+    <h3>🎚️ تنظیمات تصویر و صدا</h3>
+
+    <label>صدای ویدیوی انتخابی</label>
+    <input id="clipVolume" type="range" min="0" max="1" step="0.05" value="1">
+
+    <label>بزرگ‌نمایی دیجیتال دوربین</label>
+    <input id="zoom" type="range" min="1" max="3" step="0.1" value="1">
+
+    <p id="status">آماده به کار</p>
+    <p class="small">
+      ضبط خروجی به پشتیبانی مرورگر از Canvas Capture و MediaRecorder بستگی دارد.
+      این نسخه هنوز اتصال زنده بین دو گوشی را پیاده‌سازی نکرده است.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h3>📋 فهرست پخش</h3>
+    <ul id="playlist"></ul>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const camera = $("camera");
+const clip = $("clip");
+const pip = $("pip");
+const canvas = $("output");
+const ctx = canvas.getContext("2d");
+
+let stream = null;
+let facing = "environment";
+let clips = [];
+let current = -1;
+let mode = "camera";
+let recorder = null;
+let chunks = [];
+let animation = null;
+let recording = false;
+
+function status(message) {
+  $("status").textContent = message;
+}
+
+async function startCamera() {
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: facing,
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
+      audio: true
+    });
+
+    camera.srcObject = stream;
+    await camera.play();
+    status("دوربین روشن شد");
+  } catch (e) {
+    status("خطای دوربین: " + e.message);
+  }
+}
+
+$("startCamera").onclick = startCamera;
+
+$("switchCamera").onclick = async () => {
+  facing = facing === "environment" ? "user" : "environment";
+  await startCamera();
+};
+
+$("files").onchange = e => {
+  const files = [...e.target.files];
+
+  for (const file of files) {
+    if (!file.type.startsWith("video/")) continue;
+    clips.push({
+      name: file.name,
+      url: URL.createObjectURL(file)
+    });
+  }
+
+  renderPlaylist();
+  if (current < 0 && clips.length) selectClip(0);
+  e.target.value = "";
+};
+
+function renderPlaylist() {
+  const list = $("playlist");
+  list.innerHTML = "";
+
+  clips.forEach((item, i) => {
+    const li = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = (i + 1) + ". " + item.name;
+
+    const btn = document.createElement("button");
+    btn.textContent = "پخش";
+    btn.onclick = () => selectClip(i).then(() => playClip());
+
+    li.append(name, btn);
+    list.appendChild(li);
+  });
+}
+
+async function selectClip(i) {
+  if (i < 0 || i >= clips.length) return;
+
+  clip.pause();
+  current = i;
+  clip.src = clips[i].url;
+  clip.style.display = "block";
+  clip.volume = Number($("clipVolume").value);
+
+  try {
+    await clip.play();
+    clip.pause();
+    clip.currentTime = 0;
+  } catch (_) {}
+
+  status("انتخاب شد: " + clips[i].name);
+}
+
+async function playClip() {
+  if (current < 0 && clips.length) await selectClip(0);
+  if (current < 0) return;
+
+  clip.volume = Number($("clipVolume").value);
+
+  try {
+    await clip.play();
+    status("ویدیو در حال پخش است");
+  } catch (e) {
+    status("برای پخش، دوباره دکمه را بزن");
+  }
+}
+
+$("play").onclick = playClip;
+$("pause").onclick = () => clip.pause();
+
+$("stopClip").onclick = () => {
+  clip.pause();
+  clip.currentTime = 0;
+  clip.style.display = "none";
+  mode = "camera";
+  pip.style.display = "none";
+  status("ویدیو متوقف شد؛ دوربین فعال است");
+};
+
+clip.onended = () => {
+  clip.style.display = "none";
+  mode = "camera";
+  pip.style.display = "none";
+  status("ویدیو تمام شد");
+};
+
+$("clipVolume").oninput = () => {
+  clip.volume = Number($("clipVolume").value);
+};
+
+$("zoom").oninput = () => {
+  camera.style.transform = `scale(${$("zoom").value})`;
+};
+
+function setMode(value) {
+  mode = value;
+  camera.style.display = "block";
+  clip.style.display = "none";
+  pip.style.display = "none";
+  canvas.style.display = "none";
+
+  if (value === "camera") {
+    clip.pause();
+    status("نمای دوربین");
+  }
+
+  if (value === "clip") {
+    camera.style.display = "none";
+    clip.style.display = "block";
+    status("نمای ویدیو");
+  }
+
+  if (value === "split") {
+    clip.style.display = "block";
+    status("نمای نصف‌نصف");
+  }
+
+  if (value === "react") {
+    clip.style.display = "block";
+    pip.style.display = "block";
+    pip.srcObject = stream;
+    status("نمای واکنشی");
+  }
+
+  if (value === "black") {
+    camera.style.display = "none";
+    clip.style.display = "none";
+    status("صفحه سیاه");
+  }
+}
+
+$("viewCamera").onclick = () => setMode("camera");
+$("viewClip").onclick = () => setMode("clip");
+$("viewSplit").onclick = () => setMode("split");
+$("viewReact").onclick = () => setMode("react");
+$("black").onclick = () => setMode("black");
+$("restore").onclick = () => setMode("camera");
+
+$("fullscreen").onclick = async () => {
+  try {
+    await $("screen").requestFullscreen();
+  } catch (_) {}
+};
+
+function drawFrame() {
+  canvas.width = 1280;
+  canvas.height = 720;
+
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, 1280, 720);
+
+  const draw = (video, x, y, w, h) => {
+    if (!video || video.readyState < 2) return;
+
+    const sourceRatio = video.videoWidth / video.videoHeight;
+    const targetRatio = w / h;
+    let sx = 0, sy = 0, sw = video.videoWidth, sh = video.videoHeight;
+
+    if (sourceRatio > targetRatio) {
+      sw = video.videoHeight * targetRatio;
+      sx = (video.videoWidth - sw) / 2;
+    } else {
+      sh = video.videoWidth / targetRatio;
+      sy = (video.videoHeight - sh) / 2;
+    }
+
+    ctx.drawImage(video, sx, sy, sw, sh, x, y, w, h);
+  };
+
+  if (mode === "camera") {
+    draw(camera, 0, 0, 1280, 720);
+  } else if (mode === "clip") {
+    draw(clip, 0, 0, 1280, 720);
+  } else if (mode === "split") {
+    draw(camera, 0, 0, 640, 720);
+    draw(clip, 640, 0, 640, 720);
+  } else if (mode === "react") {
+    draw(clip, 0, 0, 1280, 720);
+    draw(camera, 880, 480, 360, 203);
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(880, 480, 360, 203);
+  }
+
+  if (recording) {
+    ctx.fillStyle = "red";
+    ctx.beginPath();
+    ctx.arc(35, 35, 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  animation = requestAnimationFrame(drawFrame);
+}
+
+function startDrawing() {
+  if (!animation) drawFrame();
+}
+
+$("record").onclick = () => {
+  if (recording) return;
+
+  if (!canvas.captureStream || !window.MediaRecorder) {
+    status("این مرورگر از ضبط خروجی پشتیبانی نمی‌کند");
+    return;
+  }
+
+  startDrawing();
+
+  try {
+    const videoStream = canvas.captureStream(30);
+    chunks = [];
+
+    recorder = new MediaRecorder(videoStream, {
+      mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
+        ? "video/webm;codecs=vp8"
+        : "video/webm"
+    });
+
+    recorder.ondataavailable = e => {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "director-duo-recording.webm";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      status("فایل ضبط‌شده آماده دانلود است");
+    };
+
+    recorder.start(1000);
+    recording = true;
+    status("ضبط تصویر خروجی شروع شد؛ صدای منابع در این نسخه ضبط نمی‌شود");
+  } catch (e) {
+    recording = false;
+    status("شروع ضبط ناموفق بود: " + e.message);
+  }
+};
+
+$("stopRecord").onclick = () => {
+  if (recorder && recorder.state !== "inactive") {
+    recording = false;
+    recorder.stop();
+  }
+};
+
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState === "visible" && stream) {
+    try { await camera.play(); } catch (_) {}
+  }
+});
+
+if ("wakeLock" in navigator) {
+  let wakeLock;
+  async function keepAwake() {
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+    } catch (_) {}
+  }
+  keepAwake();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") keepAwake();
+  });
+}
+</script>
+</body>
+</html>
