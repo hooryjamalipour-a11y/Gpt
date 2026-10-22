@@ -692,6 +692,17 @@
 
                 <!-- TAB 4: Audio Mixer -->
                 <div id="tab-content-audio" class="hidden p-3 space-y-3 flex-1 flex flex-col justify-between">
+                    <div class="rounded-xl border border-emerald-700/50 bg-slate-950/70 p-3 space-y-2">
+                        <div class="flex items-center justify-between gap-2">
+                            <label for="audio-input-select" class="text-xs font-bold text-emerald-300">🎙️ ورودی میکروفون دوربین</label>
+                            <button type="button" onclick="refreshAudioInputs()" class="text-[11px] px-2 py-1 rounded bg-slate-800 text-slate-200">🔄 تازه‌سازی</button>
+                        </div>
+                        <select id="audio-input-select" onchange="changeAudioInput(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white">
+                            <option value="">میکروفون پیش‌فرض گوشی</option>
+                        </select>
+                        <div id="audio-input-status" class="text-[11px] text-slate-400">میکروفون خارجی را وصل کن، تازه‌سازی را بزن و ورودی آن را انتخاب کن.</div>
+                        <div id="webrtc-stats-status" class="text-[11px] text-slate-400">آمار شبکه پس از اتصال نمایش داده می‌شود.</div>
+                    </div>
                     <div class="space-y-3">
                         <div class="space-y-1">
                             <div class="flex justify-between text-xs">
@@ -791,6 +802,9 @@
             localCamStream: null,
             rawVideoTrack: null,
             rawAudioTrack: null,
+            currentAudioDeviceId: '',
+            availableAudioInputs: [],
+            webrtcStatsTimer: null,
             availableLenses: [],
             currentDeviceId: '',
             currentFacingMode: 'environment',
@@ -827,7 +841,7 @@
             mediaPlaylistMode: 'sequence',
             mediaPlaylistRunning: false,
             mediaObjectUrls: [],
-            reactionOverlay: { x: 0.025, y: 0.08, size: 0.20 },
+            reactionOverlay: { x: 0.025, y: 0.66, size: 0.20 },
             lowerThirdVisible: true,
             ltTitle: 'استودیو پخش زنده PRISM',
             ltSub: 'کارگردانی چند دوربینه بدون لگ و قفل بیداری صفحه',
@@ -1047,20 +1061,92 @@
             } catch (e) {}
         }
 
-        function minimizeReceiverJitterBuffer(pc) {
+        // A modest playout buffer is safer than forcing zero and risking audio dropouts.
+        function configureReceiverPlayout(pc) {
             if (!pc || !pc.getReceivers) return;
             try {
                 pc.getReceivers().forEach(receiver => {
-                    if ('playoutDelayHint' in receiver) {
-                        receiver.playoutDelayHint = 0.0;
-                    }
-                    if ('jitterBufferTarget' in receiver) {
-                        receiver.jitterBufferTarget = 0;
+                    if (receiver.track && (receiver.track.kind === 'audio' || receiver.track.kind === 'video')) {
+                        if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.04;
+                        if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 40;
                     }
                 });
             } catch (e) {}
         }
 
+        async function refreshAudioInputs() {
+            const status = document.getElementById('audio-input-status');
+            const select = document.getElementById('audio-input-select');
+            if (!navigator.mediaDevices?.enumerateDevices || !select) return;
+            try {
+                if (!state.localCamStream || !state.rawAudioTrack) {
+                    const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                    permissionStream.getTracks().forEach(t => t.stop());
+                }
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                state.availableAudioInputs = devices.filter(d => d.kind === 'audioinput');
+                const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+                select.innerHTML = state.availableAudioInputs.map((d, i) =>
+                    `<option value="${esc(d.deviceId)}">${esc(d.label || `ورودی صدا ${i + 1}`)}</option>`
+                ).join('');
+                const activeId = state.rawAudioTrack?.getSettings?.().deviceId || state.currentAudioDeviceId;
+                if (activeId && state.availableAudioInputs.some(d => d.deviceId === activeId)) select.value = activeId;
+                else if (state.availableAudioInputs.length) select.selectedIndex = 0;
+                if (status) status.textContent = state.availableAudioInputs.length
+                    ? `تعداد ورودی‌های صدا: ${state.availableAudioInputs.length}. ورودی فعال را انتخاب و بررسی کن.`
+                    : 'هیچ ورودی صوتی پیدا نشد.';
+            } catch (err) {
+                if (status) status.textContent = `دسترسی به ورودی صدا ناموفق بود: ${err.message}`;
+            }
+        }
+
+        async function changeAudioInput(deviceId) {
+            state.currentAudioDeviceId = deviceId || '';
+            const status = document.getElementById('audio-input-status');
+            if (status) status.textContent = 'در حال تغییر ورودی صدا…';
+            if (state.role !== 'launcher') {
+                if (status) status.textContent = 'این انتخاب برای میکروفون گوشی دوربین است؛ گوشی دوربین باید ورودی خارجی را انتخاب کند.';
+                return;
+            }
+            const ok = await startHardwareCamera({
+                deviceId: state.currentDeviceId || undefined,
+                audioDeviceId: state.currentAudioDeviceId || undefined,
+                height: state.currentResHeight
+            });
+            if (ok) await startCameraWebRTCOffer();
+            const activeTrack = state.rawAudioTrack;
+            const settings = activeTrack?.getSettings?.() || {};
+            const selected = state.availableAudioInputs.find(d => d.deviceId === settings.deviceId);
+            if (status) status.textContent = activeTrack
+                ? `ورودی فعال: ${selected?.label || activeTrack.label || 'نامشخص'} | نرخ نمونه: ${settings.sampleRate || 'نامشخص'} Hz | حذف نویز: ${settings.noiseSuppression ?? 'نامشخص'} | گین خودکار: ${settings.autoGainControl ?? 'نامشخص'}`
+                : 'ترک صدای فعال پیدا نشد.';
+        }
+
+        function startWebRTCStatsMonitor(pc) {
+            if (state.webrtcStatsTimer) clearInterval(state.webrtcStatsTimer);
+            if (!pc?.getStats) return;
+            state.webrtcStatsTimer = setInterval(async () => {
+                if (state.rtcPeerConn !== pc || pc.connectionState === 'closed') {
+                    clearInterval(state.webrtcStatsTimer);
+                    state.webrtcStatsTimer = null;
+                    return;
+                }
+                try {
+                    const stats = await pc.getStats();
+                    let rtt = null, lost = null, jitter = null;
+                    stats.forEach(s => {
+                        if (s.type === 'candidate-pair' && s.state === 'succeeded' && s.nominated &&
+                            typeof s.currentRoundTripTime === 'number') rtt = Math.round(s.currentRoundTripTime * 1000);
+                        if (s.type === 'inbound-rtp' && !s.isRemote) {
+                            if (typeof s.packetsLost === 'number') lost = s.packetsLost;
+                            if (typeof s.jitter === 'number') jitter = Math.round(s.jitter * 1000);
+                        }
+                    });
+                    const el = document.getElementById('webrtc-stats-status');
+                    if (el) el.textContent = `شبکه: RTT ${rtt == null ? '—' : rtt + 'ms'} | Jitter ${jitter == null ? '—' : jitter + 'ms'} | بسته ازدست‌رفته ${lost == null ? '—' : lost}`;
+                } catch (e) {}
+            }, 2000);
+        }
         // ============================================================================
         // 5. PHYSICAL LENS ENUMERATION & HARDWARE CAMERA ENGINE
         // ============================================================================
@@ -1104,18 +1190,27 @@
             }
 
             try {
+                const audioConstraints = {
+                    echoCancellation: { ideal: false },
+                    noiseSuppression: { ideal: false },
+                    autoGainControl: { ideal: false }
+                };
+                const requestedAudioDeviceId = options.audioDeviceId || state.currentAudioDeviceId;
+                if (requestedAudioDeviceId) audioConstraints.deviceId = { exact: requestedAudioDeviceId };
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: videoConstraints,
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
+                    audio: audioConstraints
                 });
 
                 state.localCamStream = stream;
                 state.rawVideoTrack = stream.getVideoTracks()[0];
                 state.rawAudioTrack = stream.getAudioTracks()[0] || null;
+                if (state.rawAudioTrack) {
+                    const audioSettings = state.rawAudioTrack.getSettings ? state.rawAudioTrack.getSettings() : {};
+                    if (audioSettings.deviceId) state.currentAudioDeviceId = audioSettings.deviceId;
+                    const audioStatus = document.getElementById('audio-input-status');
+                    if (audioStatus) audioStatus.textContent = `ورودی فعال: ${state.rawAudioTrack.label || 'میکروفون انتخاب‌شده'} | حذف نویز: ${audioSettings.noiseSuppression ?? 'نامشخص'} | گین خودکار: ${audioSettings.autoGainControl ?? 'نامشخص'}`;
+                }
 
                 if (state.rawVideoTrack && 'contentHint' in state.rawVideoTrack) {
                     state.rawVideoTrack.contentHint = 'motion';
@@ -1150,6 +1245,7 @@
                 document.getElementById('cam-res-indicator').innerText = `RES: ${vid.videoWidth || widthIdeal}x${vid.videoHeight || heightIdeal}`;
 
                 await enumeratePhysicalLenses();
+                await refreshAudioInputs().catch(() => {});
                 await syncActiveStreamTrackToWebRTC();
                 return true;
             } catch (err) {
@@ -1556,6 +1652,7 @@
             pc.onconnectionstatechange = () => {
                 if (pc.connectionState === 'connected') {
                     enforceLowLatencyWebRTC(pc);
+                    startWebRTCStatsMonitor(pc);
                     updateConnectionBadge('connected', 'روی آنتن • متصل به کارگردان');
                 } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
                     updateConnectionBadge('ready', 'در حال بازیابی خودکار ارتباط...');
@@ -1725,7 +1822,7 @@
             state.rtcPeerConn = pc;
 
             pc.ontrack = (event) => {
-                minimizeReceiverJitterBuffer(pc);
+                configureReceiverPlayout(pc);
                 if (event.streams && event.streams[0]) {
                     attachRemoteCamera1Stream(event.streams[0]);
                 }
@@ -1737,8 +1834,9 @@
 
             pc.onconnectionstatechange = () => {
                 if (pc.connectionState === 'connected') {
-                    minimizeReceiverJitterBuffer(pc);
-                    updateConnectionBadge('connected', 'دوربین ۱ متصل شد (بدون لگ)');
+                    configureReceiverPlayout(pc);
+                    startWebRTCStatsMonitor(pc);
+                    updateConnectionBadge('connected', 'دوربین ۱ متصل شد');
                 } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
                     updateConnectionBadge('ready', 'تلاش مجدد برای اتصال دوربین ۱...');
                     verifyAndHealConnections();
@@ -2009,7 +2107,7 @@
                     ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = Math.max(1, w * 0.002); ctx.strokeRect(px, py, size, size); ctx.restore();
                 }
             } else if (sourceType === 'pip') {
-                // PiP: media is the main picture; CAM 1 (presenter) is the small inset.
+                // PiP: media is the main picture; CAM 1 is a square inset at 20% of output width, default bottom-left.
                 drawMediaLayer(ctx, 0, 0, w, h, ts);
                 const pw = Math.min(w * 0.20, h * 0.34), ph = pw;
                 const px = Math.max(w * 0.02, Math.min(w - pw - w * 0.02, w * state.reactionOverlay.x));
@@ -2332,6 +2430,7 @@
                 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
                 state.audioCtx = new AudioContextClass();
                 state.destNode = state.audioCtx.createMediaStreamDestination();
+                if (state.audioCtx.state === 'suspended') state.audioCtx.resume().catch(() => {});
             } catch (e) {}
         }
 
